@@ -1,0 +1,6 @@
+{
+  "name": "Top AI MKT Dashboard",
+  "description": "Panel de control para gestionar leads, seguimiento de demos de ads y paquetes de contenido para Top AI MKT.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

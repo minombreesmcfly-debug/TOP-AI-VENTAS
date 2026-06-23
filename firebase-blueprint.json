@@ -1,0 +1,100 @@
+{
+  "entities": {
+    "Lead": {
+      "title": "Lead",
+      "description": "A potential client for ad demos and monthly packages.",
+      "type": "object",
+      "properties": {
+        "businessOwnerName": {
+          "type": "string",
+          "description": "Name of the business owner"
+        },
+        "notes": {
+          "type": "string",
+          "description": "Extra notes for the lead"
+        },
+        "city": {
+          "type": "string",
+          "description": "City of the business"
+        },
+        "lastContactDate": {
+          "type": "string",
+          "format": "date",
+          "description": "Last time this lead was contacted"
+        },
+        "name": {
+          "type": "string",
+          "description": "Business name"
+        },
+        "phone": {
+          "type": "string",
+          "description": "Contact phone number"
+        },
+        "latitude": {
+          "type": "number",
+          "description": "Latitude for map display"
+        },
+        "longitude": {
+          "type": "number",
+          "description": "Longitude for map display"
+        },
+        "demoStatus": {
+          "type": "string",
+          "enum": ["new", "contacted", "offered", "accepted", "sent", "paid", "recurring"],
+          "description": "Current status of the ad demo"
+        },
+        "packageStatus": {
+          "type": "string",
+          "enum": ["none", "basic", "premium"],
+          "description": "Current monthly content package"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID of the user who owns this lead"
+        },
+        "assignedUserIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "List of user IDs who have shared access to this lead"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update timestamp"
+        }
+      },
+      "required": ["name", "demoStatus", "packageStatus", "ownerId", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/leads/{leadId}": {
+      "schema": "Lead",
+      "description": "Collection of business leads"
+    },
+    "/users/{userId}": {
+      "schema": {
+        "title": "UserProfile",
+        "type": "object",
+        "properties": {
+          "uid": { "type": "string" },
+          "email": { "type": "string" },
+          "displayName": { "type": "string" },
+          "photoURL": { "type": "string" },
+          "role": { "type": "string", "enum": ["admin", "user"] },
+          "status": { "type": "string", "enum": ["pending", "approved", "blocked"] },
+          "bankName": { "type": "string" },
+          "accountNumber": { "type": "string" },
+          "clabe": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "description": "User profile and permissions"
+    }
+  }
+}
