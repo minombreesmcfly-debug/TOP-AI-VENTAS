@@ -641,7 +641,10 @@ export default function App() {
 
     const unsub = onSnapshot(collection(db, 'users'), (snap) => {
       const usersData = snap.docs.map(doc => ({ uid: doc.id, ...doc.data() } as UserProfile));
-      setAllUsers(usersData);
+      const uniqueUsers = usersData.filter((u, index, self) =>
+        index === self.findIndex((item) => item.uid === u.uid)
+      );
+      setAllUsers(uniqueUsers);
     });
 
     return unsub;
@@ -691,8 +694,16 @@ export default function App() {
       snapshot.forEach((doc) => {
         leadsData.push({ id: doc.id, ...doc.data() } as Lead);
       });
-      console.log(`Fetched ${leadsData.length} leads for user ${user.uid}`);
-      setLeads(leadsData);
+      const uniqueLeads = leadsData.reduce((acc, current) => {
+        const x = acc.find(item => item.id === current.id);
+        if (!x) {
+          return acc.concat([current]);
+        } else {
+          return acc;
+        }
+      }, [] as Lead[]);
+      console.log(`Fetched ${uniqueLeads.length} unique leads for user ${user.uid}`);
+      setLeads(uniqueLeads);
     }, (error) => {
       console.error("Firestore Snapshot Error:", error);
       handleFirestoreError(error, OperationType.LIST, 'leads');
