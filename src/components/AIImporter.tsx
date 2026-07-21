@@ -4,6 +4,7 @@ import { Sparkles, X, Loader2, CheckCircle2, AlertCircle, Save, UserPlus, MapPin
 import { collection, writeBatch, doc, serverTimestamp, query, where, getDocs } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { UserProfile } from '../types';
+import { formatMexicanPhone } from '../lib/phone-helper';
 
 interface AIImporterProps {
   isOpen: boolean;
@@ -77,9 +78,15 @@ export function AIImporter({ isOpen, onClose, userId, allUsers, availableCities 
 
       const result = await response.json();
       
+      // Format all phone numbers to standard +52 Mexican format first
+      const formattedResult = result.map((l: any) => ({
+        ...l,
+        phone: formatMexicanPhone(l.phone || '')
+      }));
+      
       // Duplicate detection
       const enrichedLeads: ParsedLead[] = [];
-      const phonesToCheck = result.map((l: any) => l.phone).filter(Boolean);
+      const phonesToCheck = formattedResult.map((l: any) => l.phone).filter(Boolean);
       
       // Batch check in Firestore (using chunks of 10 for 'in' operator limits if many)
       // For simplicity and typical import sizes, we check them all or in batches
@@ -101,7 +108,7 @@ export function AIImporter({ isOpen, onClose, userId, allUsers, availableCities 
         }
       }
 
-      const finalLeads = result.map((l: any) => ({
+      const finalLeads = formattedResult.map((l: any) => ({
         ...l,
         city: l.city || defaultCity,
         isDuplicate: existingPhones.has(l.phone)
@@ -134,7 +141,7 @@ export function AIImporter({ isOpen, onClose, userId, allUsers, availableCities 
         const docRef = doc(collection(db, 'leads'));
         batch.set(docRef, {
           name: lead.name,
-          phone: lead.phone || '',
+          phone: formatMexicanPhone(lead.phone || ''),
           city: lead.city || defaultCity || '',
           businessOwnerName: '',
           lastContactDate: '',

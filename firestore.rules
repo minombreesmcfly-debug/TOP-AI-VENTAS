@@ -115,5 +115,17 @@ service cloud.firestore {
             && (request.auth.token.email.lower() == 'minombreesmcfly@gmail.com' || (incoming().role == existing().role && incoming().status == existing().status))
             && incoming().updatedAt == request.time);
     }
+
+    // Collection: Team Chat Messages
+    match /team_chat_messages/{messageId} {
+      allow read: if isSignedIn();
+      allow create: if isApproved()
+        && request.resource.data.senderId == request.auth.uid
+        && request.resource.data.text is string
+        && request.resource.data.text.size() > 0
+        && request.resource.data.text.size() <= 1000
+        && request.resource.data.createdAt == request.time;
+      allow delete, update: if isAdmin() || (isSignedIn() && resource.data.senderId == request.auth.uid);
+    }
   }
 }

@@ -105,6 +105,59 @@ ${text}`,
   }
 });
 
+// Server-side Sales AI Assistant route
+app.post('/api/gemini/assistant', async (req, res) => {
+  const { prompt, history } = req.body;
+  if (!prompt || typeof prompt !== 'string') {
+    return res.status(400).json({ error: 'El mensaje del usuario es requerido.' });
+  }
+
+  // Map history to Gemini API format: [{ role: 'user'|'model', parts: [{ text: '...' }] }]
+  const contents: any[] = [];
+  if (Array.isArray(history)) {
+    history.forEach((turn: any) => {
+      if (turn.role && turn.text) {
+        contents.push({
+          role: turn.role === 'user' ? 'user' : 'model',
+          parts: [{ text: turn.text }]
+        });
+      }
+    });
+  }
+
+  // Push the current user prompt
+  contents.push({
+    role: 'user',
+    parts: [{ text: prompt }]
+  });
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.5-flash',
+      contents: contents,
+      config: {
+        systemInstruction: `Eres un experto estratega de ventas, redacción comercial (copywriting) y consultor de marketing especializado en WhatsApp para el mercado mexicano. 
+Tu objetivo es ayudar a los agentes de venta de la plataforma a mejorar su conversión, diseñar mensajes atractivos, sugerir respuestas a objeciones difíciles y construir relaciones sólidas con los leads de la plataforma.
+
+DIRECTRICES:
+1. Habla siempre en español mexicano, con un tono entusiasta, profesional, cercano y de negocios.
+2. Sugiere mensajes de WhatsApp listos para copiar y pegar. Utiliza saltos de línea abundantes, viñetas, un lenguaje directo y emojis (de forma equilibrada) para hacerlos altamente legibles y conversacionales en dispositivos móviles.
+3. Si te preguntan sobre estrategias de venta o objeciones, sé sumamente práctico y directo al grano, usando ejemplos reales.
+4. Jamás menciones detalles del código de la plataforma, bases de datos o cuestiones técnicas de infraestructura. Mantén la ilusión de ser un colega experto en ventas.`
+      }
+    });
+
+    if (response && response.text) {
+      res.json({ text: response.text });
+    } else {
+      throw new Error('Respuesta vacía del asistente de IA.');
+    }
+  } catch (err: any) {
+    console.error('Server Gemini assistant error:', err);
+    res.status(500).json({ error: err.message || 'Error al comunicarse con el asistente de IA.' });
+  }
+});
+
 // Middleware setup depending on the environment
 async function setupVite() {
   if (process.env.NODE_ENV !== 'production') {

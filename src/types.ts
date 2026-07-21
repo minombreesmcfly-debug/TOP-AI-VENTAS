@@ -5,11 +5,16 @@ export type UserStatus = 'pending' | 'approved' | 'blocked';
 
 export interface UserProfile {
   uid: string;
-  email: string;
+  email?: string;
   displayName: string;
   photoURL?: string;
   role: UserRole;
   status: UserStatus;
+  phone?: string;
+  state?: string;
+  pin?: string; // Security PIN / password
+  trio?: string; // User's custom trio
+  mins?: string; // User's assigned minutes
   bankName?: string;
   accountNumber?: string;
   clabe?: string;

@@ -16,6 +16,9 @@ import {
   setDoc,
   doc,
   getDoc,
+  getDocs,
+  getDocFromCache,
+  getDocsFromCache,
   serverTimestamp,
   orderBy,
   arrayUnion,
@@ -26,12 +29,16 @@ import {
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { db, auth, signIn, signOut } from './lib/firebase';
 import { Lead, DemoStatus, PackageStatus, PACKAGE_INFO, DEMO_STATUS_COLORS, UserProfile } from './types';
+import { getLocalUsers, saveLocalUser, syncAndMergeUsers } from './lib/local-users';
+import { formatMexicanPhone } from './lib/phone-helper';
 import { OperationType, handleFirestoreError } from './lib/error-handler';
 import { AIImporter } from './components/AIImporter';
 import { UserManagement } from './components/UserManagement';
 import { UserPerformance } from './components/UserPerformance';
 import { DashboardAnalytics } from './components/DashboardAnalytics';
 import { ProfileSettings } from './components/ProfileSettings';
+import { TeamChat } from './components/TeamChat';
+import { SalesAIAssistant } from './components/SalesAIAssistant';
 import { 
   Plus, 
   LogOut, 
@@ -62,13 +69,65 @@ import {
   Globe,
   CheckSquare,
   User as UserIcon,
-  Loader2
+  Loader2,
+  Lock,
+  Building2,
+  CreditCard,
+  Hash
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { APIProvider, Map, AdvancedMarker, Pin, InfoWindow, useAdvancedMarkerRef } from '@vis.gl/react-google-maps';
 
 // --- Constants ---
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_PLATFORM_KEY || '';
+
+const MEXICAN_STATES = [
+  "Aguascalientes", "Baja California", "Baja California Sur", "Campeche", "Chiapas", 
+  "Chihuahua", "Coahuila", "Colima", "Ciudad de México", "Durango", 
+  "Guanajuato", "Guerrero", "Hidalgo", "Jalisco", "México", 
+  "Michoacán", "Morelos", "Nayarit", "Nuevo León", "Oaxaca", 
+  "Puebla", "Querétaro", "Quintana Roo", "San Luis Potosí", "Sinaloa", 
+  "Sonora", "Tabasco", "Tamaulipas", "Tlaxcala", "Veracruz", 
+  "Yucatán", "Zacatecas"
+];
+
+const COMMON_BANKS = [
+  "BBVA Bancomer", "Santander", "Citibanamex", "Banorte", "HSBC", 
+  "Scotiabank", "Banco Azteca", "BanCoppel", "Inbursa", "Mercado Pago", "SPIN de OXXO"
+];
+
+async function robustGetDoc(docRef: any) {
+  try {
+    return await getDoc(docRef);
+  } catch (err: any) {
+    const errMsg = err?.message || String(err);
+    if (errMsg.includes('offline') || errMsg.includes('client is offline')) {
+      try {
+        const cached = await getDocFromCache(docRef);
+        return cached;
+      } catch (cacheErr) {
+        console.warn("Failed to retrieve document from cache:", cacheErr);
+      }
+    }
+    throw err;
+  }
+}
+
+async function robustGetDocs(queryRef: any) {
+  try {
+    return await getDocs(queryRef);
+  } catch (err: any) {
+    const errMsg = err?.message || String(err);
+    if (errMsg.includes('offline') || errMsg.includes('client is offline')) {
+      try {
+        return await getDocsFromCache(queryRef);
+      } catch (cacheErr) {
+        console.warn("Failed to retrieve query results from cache:", cacheErr);
+      }
+    }
+    throw err;
+  }
+}
 
 function LeadMap({ leads, allUsers }: { leads: Lead[], allUsers: UserProfile[] }) {
   const leadsWithLocation = useMemo(() => leads.filter(l => l.latitude && l.longitude), [leads]);
@@ -170,14 +229,13 @@ function Header({ user, userProfile, isAdmin }: { user: User | null, userProfile
               <p className="text-sm font-medium">{user.displayName || 'Demo Performance'}</p>
             </div>
             <div className="w-10 h-10 bg-indigo-500 rounded-full border-2 border-indigo-400 overflow-hidden flex items-center justify-center">
-              {user.photoURL ? (
-                <img src={user.photoURL} alt="User" referrerPolicy="no-referrer" />
-              ) : (
-                <span className="text-sm font-bold">{user.email?.charAt(0).toUpperCase()}</span>
-              )}
+              <span className="text-sm font-bold">{user.displayName?.charAt(0).toUpperCase() || 'U'}</span>
             </div>
             <button 
-              onClick={() => { signOut(); }}
+              onClick={() => { 
+                localStorage.removeItem('top_ai_mkt_custom_user_id'); 
+                window.location.reload(); 
+              }}
               className="p-2 text-indigo-100 hover:text-white hover:bg-white/10 rounded-full transition-colors"
               title="Cerrar Sesión"
             >
@@ -185,13 +243,9 @@ function Header({ user, userProfile, isAdmin }: { user: User | null, userProfile
             </button>
           </div>
         ) : (
-          <button 
-            onClick={() => signIn()}
-            className="flex items-center gap-2 px-4 py-2 bg-white text-indigo-600 rounded-lg hover:bg-indigo-50 transition-colors font-bold text-sm"
-          >
-            <LogIn size={18} />
-            <span>Iniciar Sesión</span>
-          </button>
+          <div className="text-[10px] font-black uppercase tracking-widest text-indigo-200 italic">
+            Acceso Autorizado
+          </div>
         )}
       </div>
     </header>
@@ -318,21 +372,12 @@ function StatDetailModal({
                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-tight">{lead.city || 'Ubicación no especificada'}</p>
                   </div>
                   <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
-                    <a
-                      href={`https://wa.me/${lead.phone.replace(/\D/g, '')}`}
-                      target="_blank"
-                      rel="noreferrer"
+                    <button 
+                      onClick={() => onCallLead(lead)}
                       className="p-2 bg-white shadow-sm rounded-lg text-emerald-500 hover:bg-emerald-500 hover:text-white transition-all border border-emerald-50"
                       title="Enviar WhatsApp"
                     >
                       <MessageCircle size={14} />
-                    </a>
-                    <button 
-                      onClick={() => onCallLead(lead)}
-                      className="p-2 bg-white shadow-sm rounded-lg text-emerald-600 hover:bg-emerald-600 hover:text-white transition-all border border-emerald-50"
-                      title="Llamar hoy"
-                    >
-                      <Phone size={14} />
                     </button>
                     <button 
                       onClick={() => onEditLead(lead)}
@@ -403,7 +448,208 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
-  const [view, setView] = useState<'leads' | 'users' | 'analytics' | 'profile'>('leads');
+  const [view, setView] = useState<'leads' | 'users' | 'analytics' | 'profile' | 'chat' | 'ai'>('leads');
+  
+  // Custom Auth state
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [loginUsername, setLoginUsername] = useState('');
+  const [loginPin, setLoginPin] = useState('');
+  const [regDisplayName, setRegDisplayName] = useState('');
+  const [regPhone, setRegPhone] = useState('');
+  const [regState, setRegState] = useState('Ciudad de México');
+  const [regPin, setRegPin] = useState('');
+  const [regBankName, setRegBankName] = useState('');
+  const [regAccountNumber, setRegAccountNumber] = useState('');
+  const [regClabe, setRegClabe] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
+
+  const handleCustomLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!loginUsername || !loginPin) {
+      setAuthError('Por favor ingresa usuario y PIN.');
+      return;
+    }
+    
+    setIsAuthenticating(true);
+    setAuthError('');
+    
+    try {
+      let profile: UserProfile | null = null;
+      const usernameLower = loginUsername.trim().toLowerCase();
+      
+      if (usernameLower === 'admin') {
+        // Try Firestore first for admin
+        try {
+          const snap = await robustGetDoc(doc(db, 'users', 'admin'));
+          if (snap.exists()) {
+            profile = { uid: 'admin', ...(snap.data() as any) } as UserProfile;
+            saveLocalUser(profile);
+          }
+        } catch (err) {
+          console.warn("Could not read admin from Firestore, trying local fallback:", err);
+        }
+
+        // Local Admin fallback if offline or not in Firestore yet
+        if (!profile) {
+          const localUsers = getLocalUsers();
+          const localAdmin = localUsers.find(u => u.uid === 'admin');
+          if (localAdmin) {
+            profile = localAdmin;
+          } else {
+            profile = {
+              uid: 'admin',
+              displayName: 'Administrador',
+              phone: 'admin',
+              role: 'admin',
+              status: 'approved',
+              pin: '3223',
+              trio: 'Admin',
+              mins: 'Ilimitados',
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            };
+            saveLocalUser(profile);
+          }
+        }
+      } else {
+        // Look up locally first - instant and 100% robust offline
+        const localUsers = getLocalUsers();
+        profile = localUsers.find(u => u.phone === loginUsername.trim()) || null;
+
+        // If not found locally, attempt Firestore lookup
+        if (!profile) {
+          try {
+            const q = query(collection(db, 'users'), where('phone', '==', loginUsername.trim()));
+            const snap = await robustGetDocs(q);
+            if (!snap.empty) {
+              profile = { uid: snap.docs[0].id, ...(snap.docs[0].data() as any) } as UserProfile;
+              saveLocalUser(profile);
+            }
+          } catch (err) {
+            console.warn("Could not query Firestore for user phone:", err);
+          }
+        }
+      }
+      
+      if (!profile) {
+        setAuthError('El usuario o número de teléfono no está registrado.');
+        setIsAuthenticating(false);
+        return;
+      }
+      
+      if (profile.pin !== loginPin.trim()) {
+        setAuthError('PIN de seguridad incorrecto.');
+        setIsAuthenticating(false);
+        return;
+      }
+      
+      // Store session and set states
+      localStorage.setItem('top_ai_mkt_custom_user_id', profile.uid);
+      setUserProfile(profile);
+      setUser({
+        uid: profile.uid,
+        email: profile.email || '',
+        displayName: profile.displayName
+      } as any);
+      
+      // Clear fields
+      setLoginUsername('');
+      setLoginPin('');
+    } catch (err: any) {
+      console.error("Error in custom login:", err);
+      setAuthError('Ocurrió un error al iniciar sesión: ' + err.message);
+    } finally {
+      setIsAuthenticating(false);
+    }
+  };
+
+  const handleCustomRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!regDisplayName || !regPhone || !regPin) {
+      setAuthError('Nombre, Teléfono y PIN son requeridos.');
+      return;
+    }
+    
+    setIsAuthenticating(true);
+    setAuthError('');
+    
+    try {
+      const trimmedPhone = regPhone.trim();
+      
+      // Check local users first
+      const localUsers = getLocalUsers();
+      const existingLocal = localUsers.find(u => u.phone === trimmedPhone);
+      if (existingLocal) {
+        setAuthError('Este número de teléfono ya está registrado localmente.');
+        setIsAuthenticating(false);
+        return;
+      }
+
+      // Check Firestore if online
+      try {
+        const q = query(collection(db, 'users'), where('phone', '==', trimmedPhone));
+        const snap = await robustGetDocs(q);
+        if (!snap.empty) {
+          setAuthError('Este número de teléfono ya está registrado.');
+          setIsAuthenticating(false);
+          return;
+        }
+      } catch (err) {
+        console.log("Firestore uniqueness check skipped (running in offline-mode fallback).");
+      }
+      
+      const newUid = 'usr_' + Date.now();
+      const userPayload: UserProfile = {
+        uid: newUid,
+        displayName: regDisplayName.trim(),
+        phone: trimmedPhone,
+        state: regState,
+        pin: regPin.trim(),
+        bankName: regBankName,
+        accountNumber: regAccountNumber.trim(),
+        clabe: regClabe.trim(),
+        role: 'user',
+        status: 'pending', // Pending approval by admin!
+        trio: '',
+        mins: '',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+
+      // Save locally first to guarantee zero-latency success
+      saveLocalUser(userPayload);
+
+      // Attempt to save to Firestore in the background/offline sync
+      setDoc(doc(db, 'users', newUid), {
+        ...userPayload,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      }).catch((err: any) => {
+        console.warn("Firestore save deferred/skipped because client is offline. Local registration succeeded.", err.message);
+      });
+      
+      alert('¡Registro exitoso! Tu cuenta está en espera de la aprobación de un administrador.');
+      
+      // Switch to login mode and pre-fill username
+      setLoginUsername(trimmedPhone);
+      setAuthMode('login');
+      
+      // Reset registration form
+      setRegDisplayName('');
+      setRegPhone('');
+      setRegPin('');
+      setRegBankName('');
+      setRegAccountNumber('');
+      setRegClabe('');
+    } catch (err: any) {
+      console.error("Error in custom registration:", err);
+      setAuthError('Error al registrarse: ' + err.message);
+    } finally {
+      setIsAuthenticating(false);
+    }
+  };
+
   const [viewingUserId, setViewingUserId] = useState<string | null>(null);
   const [inspectingUserProfileId, setInspectingUserProfileId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -572,65 +818,98 @@ export default function App() {
   const stopAuditingUser = () => {
     setViewingUserId(null);
   };
+
+  // Custom user session manager
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      if (!u) {
-        setLoading(false);
+    // Function to seed/ensure default admin user exists in Firestore
+    const ensureAdminExists = async () => {
+      try {
+        const adminRef = doc(db, 'users', 'admin');
+        const adminSnap = await robustGetDoc(adminRef);
+        if (!adminSnap.exists()) {
+          await setDoc(adminRef, {
+            uid: 'admin',
+            displayName: 'Administrador',
+            phone: 'admin',
+            role: 'admin',
+            status: 'approved',
+            pin: '3223',
+            trio: 'Admin',
+            mins: 'Ilimitados',
+            createdAt: new Date(),
+            updatedAt: new Date()
+          });
+          console.log("Seeded default admin user in Firestore");
+        }
+      } catch (err: any) {
+        const errMsg = err?.message || String(err);
+        if (errMsg.includes('client is offline') || errMsg.includes('offline')) {
+          console.log("Firestore client is offline, admin seeding skipped.");
+        } else {
+          console.warn("Could not seed default admin user (possibly offline or unprovisioned):", errMsg);
+        }
+      }
+    };
+
+    ensureAdminExists();
+
+    const customUserId = localStorage.getItem('top_ai_mkt_custom_user_id');
+    if (!customUserId) {
+      setUser(null);
+      setUserProfile(null);
+      setLoading(false);
+      return;
+    }
+
+    // Attempt to load from local storage first to prevent blocking/hanging if offline
+    const localUsers = getLocalUsers();
+    const localProfile = localUsers.find(u => u.uid === customUserId);
+    if (localProfile) {
+      setUserProfile(localProfile);
+      setUser({
+        uid: localProfile.uid,
+        email: localProfile.email || '',
+        displayName: localProfile.displayName
+      } as any);
+      setLoading(false);
+    }
+
+    // Subscribe to current custom user profile
+    const unsub = onSnapshot(doc(db, 'users', customUserId), (snap) => {
+      if (snap.exists()) {
+        const profile = { uid: snap.id, ...snap.data() } as UserProfile;
+        setUserProfile(profile);
+        setUser({
+          uid: profile.uid,
+          email: profile.email || '',
+          displayName: profile.displayName
+        } as any);
+        saveLocalUser(profile);
+      } else {
+        if (!localProfile) {
+          localStorage.removeItem('top_ai_mkt_custom_user_id');
+          setUser(null);
+          setUserProfile(null);
+        }
+      }
+      setLoading(false);
+    }, (error: any) => {
+      const errMsg = error?.message || String(error);
+      if (errMsg.includes('client is offline') || errMsg.includes('offline')) {
+        console.log("Firestore client is offline while reading session. Using local cached profile.");
+      } else {
+        console.warn("Error reading custom user session:", errMsg);
+      }
+      if (!localProfile) {
+        localStorage.removeItem('top_ai_mkt_custom_user_id');
+        setUser(null);
         setUserProfile(null);
       }
-    });
-    return unsubscribe;
-  }, []);
-
-  // Sync user profile
-  useEffect(() => {
-    if (!user) return;
-
-    const unsub = onSnapshot(doc(db, 'users', user.uid), async (snap) => {
-      const isAdminEmail = user.email?.toLowerCase() === 'minombreesmcfly@gmail.com';
-      
-      if (snap.exists()) {
-        const data = snap.data();
-        const profile = { uid: snap.id, ...data } as UserProfile;
-        
-        // Auto-upgrade bootstrap admin if stuck in pending/user role
-        if (isAdminEmail && (profile.role !== 'admin' || profile.status !== 'approved')) {
-          try {
-            await updateDoc(doc(db, 'users', user.uid), {
-              role: 'admin',
-              status: 'approved',
-              updatedAt: serverTimestamp()
-            });
-            // State will update on next snapshot
-          } catch (err) {
-            console.error("Error auto-upgrading admin:", err);
-          }
-        }
-        
-        setUserProfile(profile);
-        setLoading(false);
-      } else {
-        const newProfile: UserProfile = {
-          uid: user.uid,
-          email: user.email || '',
-          displayName: user.displayName || 'User',
-          photoURL: user.photoURL || '',
-          role: isAdminEmail ? 'admin' : 'user',
-          status: isAdminEmail ? 'approved' : 'pending',
-          createdAt: serverTimestamp() as any,
-          updatedAt: serverTimestamp() as any
-        };
-        try {
-          await setDoc(doc(db, 'users', user.uid), newProfile);
-        } catch (err) {
-          console.error("Error creating initial profile:", err);
-        }
-      }
+      setLoading(false);
     });
 
     return unsub;
-  }, [user]);
+  }, []);
 
   // Fetch all users for admin
   useEffect(() => {
@@ -641,10 +920,12 @@ export default function App() {
 
     const unsub = onSnapshot(collection(db, 'users'), (snap) => {
       const usersData = snap.docs.map(doc => ({ uid: doc.id, ...doc.data() } as UserProfile));
-      const uniqueUsers = usersData.filter((u, index, self) =>
-        index === self.findIndex((item) => item.uid === u.uid)
-      );
-      setAllUsers(uniqueUsers);
+      const merged = syncAndMergeUsers(usersData);
+      setAllUsers(merged);
+    }, (error: any) => {
+      console.warn("Firestore user subscription failed (offline/error):", error);
+      const localUsers = getLocalUsers();
+      setAllUsers(localUsers);
     });
 
     return unsub;
@@ -656,7 +937,7 @@ export default function App() {
       return;
     }
 
-    let q;
+    let q: any;
     if (isAdmin) {
       if (viewingUserId) {
         // Auditor view: Filter leads assigned to the target user
@@ -684,7 +965,7 @@ export default function App() {
       );
     }
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    const unsubscribe = onSnapshot(q, (snapshot: any) => {
       if (snapshot.metadata.hasPendingWrites) {
         // This is a local update, we can still process it but maybe it's the 
         // cause of the 'disappearing' if it doesn't match the server state later.
@@ -704,9 +985,14 @@ export default function App() {
       }, [] as Lead[]);
       console.log(`Fetched ${uniqueLeads.length} unique leads for user ${user.uid}`);
       setLeads(uniqueLeads);
-    }, (error) => {
-      console.error("Firestore Snapshot Error:", error);
-      handleFirestoreError(error, OperationType.LIST, 'leads');
+    }, (error: any) => {
+      const errMsg = error?.message || String(error);
+      if (errMsg.includes('client is offline') || errMsg.includes('offline')) {
+        console.log("Firestore client is offline while listening to leads.");
+      } else {
+        console.warn("Firestore Snapshot Error:", errMsg);
+        handleFirestoreError(error, OperationType.LIST, 'leads');
+      }
     });
 
     return unsubscribe;
@@ -726,11 +1012,11 @@ export default function App() {
     });
   }, [leads, searchTerm, filterStatus, locationFilter, sortOrder]);
 
-  const handleCallLead = async (lead: Lead) => {
+  const handleWhatsAppLead = async (lead: Lead) => {
     if (!lead.phone) return;
     
-    // 1. Abrir aplicación de teléfono
-    window.location.href = `tel:${lead.phone.replace(/\D/g, '')}`;
+    // 1. Abrir aplicación de WhatsApp
+    window.open(`https://wa.me/${lead.phone.replace(/\D/g, '')}`, '_blank');
     
     // 2. Actualizar Firebase
     try {
@@ -749,7 +1035,7 @@ export default function App() {
       
       await updateDoc(docRef, updateData);
     } catch (error) {
-      console.error("Error al registrar llamada:", error);
+      console.error("Error al registrar contacto de WhatsApp:", error);
     }
   };
 
@@ -773,7 +1059,7 @@ export default function App() {
         city: formData.get('city') || "",
         lastContactDate: formData.get('lastContactDate') || "",
         followUpDate: formData.get('followUpDate') || "",
-        phone: formData.get('phone') || "",
+        phone: formatMexicanPhone(formData.get('phone') as string || ""),
         notes: formData.get('notes') || "",
         demoStatus: formData.get('demoStatus'),
         packageStatus: formData.get('packageStatus'),
@@ -793,20 +1079,24 @@ export default function App() {
         }
         
         const docRef = doc(db, 'leads', editingLead.id);
-        await updateDoc(docRef, rawData);
-        console.log(">>> [DEBUG] Update completado en Firebase");
+        updateDoc(docRef, rawData).catch((error) => {
+          console.error(">>> [DEBUG] Background updateDoc failed:", error);
+        });
+        console.log(">>> [DEBUG] Update initiated in Firebase");
       } else {
         console.log(">>> [DEBUG] Creando nuevo lead");
         const creatorId = user.uid;
         const finalOwnerId = targetOwnerId || creatorId;
         
-        await addDoc(collection(db, 'leads'), {
+        addDoc(collection(db, 'leads'), {
           ...rawData,
           ownerId: finalOwnerId,
           assignedUserIds: [finalOwnerId],
           createdAt: serverTimestamp(),
+        }).catch((error) => {
+          console.error(">>> [DEBUG] Background addDoc failed:", error);
         });
-        console.log(">>> [DEBUG] Add completado en Firebase");
+        console.log(">>> [DEBUG] Add initiated in Firebase");
       }
 
       setIsModalOpen(false);
@@ -900,22 +1190,221 @@ export default function App() {
 
       <main className="max-w-7xl mx-auto px-4 py-8">
         {!user ? (
-          <motion.div 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="text-center py-20 bg-white rounded-2xl border border-dashed border-gray-300"
-          >
-            <h1 className="text-3xl font-bold mb-4">Bienvenido a Top AI MKT</h1>
-            <p className="text-gray-500 mb-8 max-w-md mx-auto">
-              Inicia sesión para gestionar tus leads, demos de ads y paquetes de contenido mensual de forma sencilla. Tus datos se guardan de forma segura.
-            </p>
-            <button 
-              onClick={() => signIn()}
-              className="px-8 py-3 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-all font-semibold shadow-lg shadow-indigo-200"
+          <div className="max-w-md mx-auto">
+            {/* Tab Selectors */}
+            <div className="flex bg-slate-200/60 p-1 rounded-2xl mb-6 border border-slate-100">
+              <button
+                type="button"
+                onClick={() => { setAuthMode('login'); setAuthError(''); }}
+                className={`flex-1 py-3 text-xs font-black uppercase tracking-widest rounded-xl transition-all ${
+                  authMode === 'login'
+                    ? 'bg-white text-slate-800 shadow'
+                    : 'text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                Iniciar Sesión
+              </button>
+              <button
+                type="button"
+                onClick={() => { setAuthMode('register'); setAuthError(''); }}
+                className={`flex-1 py-3 text-xs font-black uppercase tracking-widest rounded-xl transition-all ${
+                  authMode === 'register'
+                    ? 'bg-white text-slate-800 shadow'
+                    : 'text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                Registrar Cuenta
+              </button>
+            </div>
+
+            <motion.div
+              initial={{ opacity: 0, y: 15 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-white rounded-3xl p-8 shadow-xl border border-slate-100 space-y-6"
             >
-              Comenzar Ahora con Google
-            </button>
-          </motion.div>
+              <div className="text-center space-y-2">
+                <h2 className="text-2xl font-black text-slate-800 tracking-tight uppercase">
+                  {authMode === 'login' ? 'Bienvenido' : 'Crear Cuenta'}
+                </h2>
+                <p className="text-slate-400 text-xs font-bold uppercase tracking-wider">
+                  {authMode === 'login' 
+                    ? 'Gestiona tus leads, trios y WhatsApp de clientes'
+                    : 'Llena tus datos para registrarte en Top AI MKT'}
+                </p>
+              </div>
+
+              {authError && (
+                <div className="p-4 bg-red-50 text-red-600 border border-red-100 rounded-2xl text-xs font-bold text-center uppercase tracking-wide">
+                  {authError}
+                </div>
+              )}
+
+              {authMode === 'login' ? (
+                <form onSubmit={handleCustomLogin} className="space-y-4">
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-wider ml-1">Usuario / Teléfono</label>
+                    <div className="relative">
+                      <Phone className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
+                      <input
+                        type="text"
+                        required
+                        placeholder="Ej. admin o tu teléfono"
+                        className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-indigo-100 focus:border-indigo-600 outline-none transition-all font-medium text-sm"
+                        value={loginUsername}
+                        onChange={(e) => setLoginUsername(e.target.value)}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-wider ml-1">PIN de Seguridad</label>
+                    <div className="relative">
+                      <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
+                      <input
+                        type="password"
+                        required
+                        placeholder="Ej. 3223 o tu PIN"
+                        className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-indigo-100 focus:border-indigo-600 outline-none transition-all font-mono text-sm"
+                        value={loginPin}
+                        onChange={(e) => setLoginPin(e.target.value)}
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={isAuthenticating}
+                    className="w-full py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-lg shadow-indigo-100 transition-all active:scale-[0.98] disabled:opacity-50 mt-2"
+                  >
+                    {isAuthenticating ? 'Autenticando...' : 'INGRESAR A LA PLATAFORMA'}
+                  </button>
+                </form>
+              ) : (
+                <form onSubmit={handleCustomRegister} className="space-y-4">
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-wider ml-1">Nombre Completo *</label>
+                    <div className="relative">
+                      <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
+                      <input
+                        type="text"
+                        required
+                        placeholder="Ej. Juan Pérez"
+                        className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-indigo-100 focus:border-indigo-600 outline-none transition-all font-medium text-sm"
+                        value={regDisplayName}
+                        onChange={(e) => setRegDisplayName(e.target.value)}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-wider ml-1">Teléfono *</label>
+                    <div className="relative">
+                      <Phone className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
+                      <input
+                        type="text"
+                        required
+                        placeholder="Ej. 5512345678"
+                        className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-indigo-100 focus:border-indigo-600 outline-none transition-all font-medium text-sm"
+                        value={regPhone}
+                        onChange={(e) => setRegPhone(e.target.value)}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-wider ml-1">Estado de la República *</label>
+                    <div className="relative">
+                      <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
+                      <select
+                        className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-indigo-100 outline-none text-sm font-medium"
+                        value={regState}
+                        onChange={(e) => setRegState(e.target.value)}
+                      >
+                        {MEXICAN_STATES.map((st) => (
+                          <option key={st} value={st}>{st}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-wider ml-1">PIN de Seguridad *</label>
+                    <div className="relative">
+                      <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
+                      <input
+                        type="text"
+                        required
+                        placeholder="PIN para iniciar sesión"
+                        className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-indigo-100 focus:border-indigo-600 outline-none transition-all font-mono text-sm font-medium"
+                        value={regPin}
+                        onChange={(e) => setRegPin(e.target.value)}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Optional Bank Info */}
+                  <div className="border-t border-slate-100 pt-4 mt-2 space-y-4">
+                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">
+                      Datos de Pago (Opcionales - se pueden agregar después)
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-black text-slate-500 uppercase tracking-wider ml-1">Banco Destinatario</label>
+                      <div className="relative">
+                        <Building2 className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
+                        <select
+                          className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-indigo-100 outline-none text-sm font-medium"
+                          value={regBankName}
+                          onChange={(e) => setRegBankName(e.target.value)}
+                        >
+                          <option value="">-- Selecciona un banco (Opcional) --</option>
+                          {COMMON_BANKS.map((bk) => (
+                            <option key={bk} value={bk}>{bk}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-black text-slate-500 uppercase tracking-wider ml-1">CLABE Interbancaria (18 dígitos)</label>
+                      <div className="relative">
+                        <CreditCard className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
+                        <input
+                          type="text"
+                          placeholder="CLABE de 18 dígitos"
+                          className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-indigo-100 focus:border-indigo-600 outline-none transition-all font-mono text-sm"
+                          value={regClabe}
+                          onChange={(e) => setRegClabe(e.target.value)}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-black text-slate-500 uppercase tracking-wider ml-1">Número de Cuenta</label>
+                      <div className="relative">
+                        <Hash className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
+                        <input
+                          type="text"
+                          placeholder="Número de cuenta bancaria"
+                          className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-indigo-100 focus:border-indigo-600 outline-none transition-all font-mono text-sm"
+                          value={regAccountNumber}
+                          onChange={(e) => setRegAccountNumber(e.target.value)}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={isAuthenticating}
+                    className="w-full py-4 bg-teal-600 hover:bg-teal-700 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-lg shadow-teal-100 transition-all active:scale-[0.98] disabled:opacity-50 mt-4"
+                  >
+                    {isAuthenticating ? 'Registrando...' : 'REGISTRAR MI CUENTA'}
+                  </button>
+                </form>
+              )}
+            </motion.div>
+          </div>
         ) : userProfile?.status === 'pending' ? (
           <motion.div 
             initial={{ opacity: 0, scale: 0.95 }}
@@ -960,6 +1449,28 @@ export default function App() {
               >
                 <LayoutDashboard size={14} />
                 LEADS
+              </button>
+              <button 
+                onClick={() => setView('chat')}
+                className={`flex items-center gap-2 px-6 py-2 rounded-xl text-xs font-black transition-all ${
+                  view === 'chat' 
+                    ? 'bg-indigo-600 text-white shadow-md' 
+                    : 'text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                <MessageSquare size={14} />
+                CHAT INTERNO
+              </button>
+              <button 
+                onClick={() => setView('ai')}
+                className={`flex items-center gap-2 px-6 py-2 rounded-xl text-xs font-black transition-all ${
+                  view === 'ai' 
+                    ? 'bg-indigo-600 text-white shadow-md' 
+                    : 'text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                <Sparkles size={14} />
+                ASISTENTE AI
               </button>
               <button 
                 onClick={() => setView('analytics')}
@@ -1035,6 +1546,10 @@ export default function App() {
                   onInspectProfile={(uid) => setInspectingUserProfileId(uid)}
                 />
               )
+            ) : view === 'chat' ? (
+              <TeamChat userProfile={userProfile!} allUsers={allUsers} />
+            ) : view === 'ai' ? (
+              <SalesAIAssistant userProfile={userProfile!} />
             ) : view === 'analytics' ? (
               <DashboardAnalytics leads={leads} onSelectCategory={handleStatSelect} />
             ) : view === 'profile' ? (
@@ -1326,11 +1841,11 @@ export default function App() {
                           </div>
                             <div className="flex items-center gap-0.5">
                               <button 
-                                onClick={() => handleCallLead(lead)}
+                                onClick={() => handleWhatsAppLead(lead)}
                                 className="p-1.5 text-emerald-500 hover:text-emerald-700 hover:bg-emerald-50 rounded transition-all"
-                                title="Llamar hoy"
+                                title="Enviar WhatsApp"
                               >
-                                <Phone size={14} />
+                                <MessageCircle size={14} />
                               </button>
                               <button 
                                 onClick={() => { setEditingLead(lead); setIsModalOpen(true); }}
@@ -1830,7 +2345,7 @@ export default function App() {
                 setView('leads');
                 setSearchTerm(lead.name);
               }}
-              onCallLead={handleCallLead}
+              onCallLead={handleWhatsAppLead}
               onDeleteLead={handleDeleteLead}
               onQuickStatusChange={handleQuickStatusChange}
             />
