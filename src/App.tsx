@@ -98,34 +98,49 @@ const COMMON_BANKS = [
   "Scotiabank", "Banco Azteca", "BanCoppel", "Inbursa", "Mercado Pago", "SPIN de OXXO"
 ];
 
-async function robustGetDoc(docRef: any) {
+function withTimeout<T>(promise: Promise<T>, ms: number = 2500): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Operation timed out after ${ms}ms`));
+    }, ms);
+    promise
+      .then((res) => {
+        clearTimeout(timer);
+        resolve(res);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
+async function robustGetDoc(docRef: any, timeoutMs: number = 2500) {
   try {
-    return await getDoc(docRef);
+    return await withTimeout(getDoc(docRef), timeoutMs);
   } catch (err: any) {
     const errMsg = err?.message || String(err);
-    if (errMsg.includes('offline') || errMsg.includes('client is offline')) {
-      try {
-        const cached = await getDocFromCache(docRef);
-        return cached;
-      } catch (cacheErr) {
-        console.warn("Failed to retrieve document from cache:", cacheErr);
-      }
+    console.warn("robustGetDoc network call failed or timed out:", errMsg);
+    try {
+      const cached = await getDocFromCache(docRef);
+      return cached;
+    } catch (cacheErr) {
+      console.warn("Failed to retrieve document from cache:", cacheErr);
     }
     throw err;
   }
 }
 
-async function robustGetDocs(queryRef: any) {
+async function robustGetDocs(queryRef: any, timeoutMs: number = 3000) {
   try {
-    return await getDocs(queryRef);
+    return await withTimeout(getDocs(queryRef), timeoutMs);
   } catch (err: any) {
     const errMsg = err?.message || String(err);
-    if (errMsg.includes('offline') || errMsg.includes('client is offline')) {
-      try {
-        return await getDocsFromCache(queryRef);
-      } catch (cacheErr) {
-        console.warn("Failed to retrieve query results from cache:", cacheErr);
-      }
+    console.warn("robustGetDocs network call failed or timed out:", errMsg);
+    try {
+      return await getDocsFromCache(queryRef);
+    } catch (cacheErr) {
+      console.warn("Failed to retrieve query results from cache:", cacheErr);
     }
     throw err;
   }
@@ -496,58 +511,60 @@ export default function App() {
     
     try {
       let profile: UserProfile | null = null;
-      const usernameLower = loginUsername.trim().toLowerCase();
-      
-      const trimmedPhone = loginUsername.trim();
-      const inputDigits = trimmedPhone.replace(/\D/g, '');
+      const rawInput = loginUsername.trim();
+      const usernameLower = rawInput.toLowerCase();
+      const inputDigits = rawInput.replace(/\D/g, '');
 
       if (usernameLower === 'admin') {
-        // Try Firestore first for admin
-        try {
-          const snap = await robustGetDoc(doc(db, 'users', 'admin'));
-          if (snap.exists()) {
-            profile = { uid: 'admin', ...(snap.data() as any) } as UserProfile;
-            saveLocalUser(profile);
-          }
-        } catch (err) {
-          console.warn("Could not read admin from Firestore, trying local fallback:", err);
-        }
-
-        // Local Admin fallback if offline or not in Firestore yet
-        if (!profile) {
-          const localUsers = getLocalUsers();
-          const localAdmin = localUsers.find(u => u.uid === 'admin');
-          if (localAdmin) {
-            profile = localAdmin;
-          } else {
-            profile = {
-              uid: 'admin',
-              displayName: 'Administrador',
-              phone: 'admin',
-              role: 'admin',
-              status: 'approved',
-              pin: '3223',
-              mins: 'Ilimitados',
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString()
-            };
-            saveLocalUser(profile);
-          }
-        }
-      } else {
-        // 1. Look up locally first
+        // Try local storage for admin first
         const localUsers = getLocalUsers();
-        profile = localUsers.find(u => 
-          u.phone === trimmedPhone ||
-          (inputDigits.length >= 7 && u.phone && u.phone.replace(/\D/g, '') === inputDigits) ||
-          (inputDigits.length >= 10 && u.phone && u.phone.replace(/\D/g, '').endsWith(inputDigits.slice(-10)))
-        ) || null;
+        const localAdmin = localUsers.find(u => u.uid === 'admin');
+        if (localAdmin) {
+          profile = localAdmin;
+        }
 
-        // 2. Query Firestore by exact phone string match
+        // Try Firestore for admin with 2s timeout
         if (!profile) {
           try {
-            const q = query(collection(db, 'users'), where('phone', '==', trimmedPhone));
-            const snap = await robustGetDocs(q);
+            const snap = await robustGetDoc(doc(db, 'users', 'admin'), 2000);
+            if (snap.exists()) {
+              profile = { uid: 'admin', ...(snap.data() as any) } as UserProfile;
+              saveLocalUser(profile);
+            }
+          } catch (err) {
+            console.warn("Could not read admin from Firestore:", err);
+          }
+        }
+
+        if (!profile) {
+          profile = {
+            uid: 'admin',
+            displayName: 'Administrador',
+            phone: 'admin',
+            role: 'admin',
+            status: 'approved',
+            pin: '3223',
+            mins: 'Ilimitados',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          };
+          saveLocalUser(profile);
+        }
+      } else {
+        // 1. Look up locally first (instant check)
+        const localUsers = getLocalUsers();
+        profile = localUsers.find(u => 
+          u.phone === rawInput ||
+          (inputDigits.length >= 7 && u.phone && u.phone.replace(/\D/g, '') === inputDigits) ||
+          (inputDigits.length >= 7 && u.phone && u.phone.replace(/\D/g, '').endsWith(inputDigits.slice(-7))) ||
+          (u.displayName && u.displayName.trim().toLowerCase() === usernameLower)
+        ) || null;
+
+        // 2. Query Firestore by exact phone string match (2.5s timeout)
+        if (!profile) {
+          try {
+            const q = query(collection(db, 'users'), where('phone', '==', rawInput));
+            const snap = await robustGetDocs(q, 2500);
             if (!snap.empty) {
               profile = { uid: snap.docs[0].id, ...(snap.docs[0].data() as any) } as UserProfile;
               saveLocalUser(profile);
@@ -557,10 +574,10 @@ export default function App() {
           }
         }
 
-        // 3. Query Firestore for all users to match by normalized phone digits or displayName
+        // 3. Query Firestore for all users to match by normalized phone digits or displayName (3s timeout)
         if (!profile) {
           try {
-            const allUsersSnap = await robustGetDocs(collection(db, 'users'));
+            const allUsersSnap = await robustGetDocs(collection(db, 'users'), 3000);
             allUsersSnap.docs.forEach(docSnap => {
               if (profile) return;
               const uData = docSnap.data() as UserProfile;
@@ -568,9 +585,9 @@ export default function App() {
               const uDigits = uPhone.replace(/\D/g, '');
 
               if (
-                uPhone === trimmedPhone ||
+                uPhone === rawInput ||
                 (inputDigits.length >= 7 && uDigits === inputDigits) ||
-                (inputDigits.length >= 10 && uDigits.length >= 10 && uDigits.slice(-10) === inputDigits.slice(-10)) ||
+                (inputDigits.length >= 7 && uDigits.length >= 7 && uDigits.slice(-7) === inputDigits.slice(-7)) ||
                 (uData.displayName && uData.displayName.trim().toLowerCase() === usernameLower)
               ) {
                 profile = { uid: docSnap.id, ...uData };
@@ -995,53 +1012,51 @@ export default function App() {
       return;
     }
 
-    let q: any;
-    if (isAdmin) {
-      if (viewingUserId) {
-        // Auditor view: Filter leads assigned to the target user
-        q = query(
-          collection(db, 'leads'),
-          or(
-            where('ownerId', '==', viewingUserId),
-            where('assignedUserIds', 'array-contains', viewingUserId)
-          ),
-          orderBy('createdAt', 'desc')
-        );
-      } else {
-        // Global view: See everything
-        q = query(collection(db, 'leads'), orderBy('createdAt', 'desc'));
-      }
-    } else {
-      // Normal agent view: Only their own or shared leads
-      q = query(
-        collection(db, 'leads'),
-        or(
-          where('ownerId', '==', user.uid),
-          where('assignedUserIds', 'array-contains', user.uid)
-        ),
-        orderBy('createdAt', 'desc')
-      );
-    }
+    const q = collection(db, 'leads');
 
     const unsubscribe = onSnapshot(q, (snapshot: any) => {
-      if (snapshot.metadata.hasPendingWrites) {
-        // This is a local update, we can still process it but maybe it's the 
-        // cause of the 'disappearing' if it doesn't match the server state later.
-        // However, standard onSnapshot handles this.
-      }
       const leadsData: Lead[] = [];
-      snapshot.forEach((doc) => {
-        leadsData.push({ id: doc.id, ...doc.data() } as Lead);
+      snapshot.forEach((docSnap: any) => {
+        leadsData.push({ id: docSnap.id, ...docSnap.data() } as Lead);
       });
-      const uniqueLeads = leadsData.reduce((acc, current) => {
-        const x = acc.find(item => item.id === current.id);
-        if (!x) {
-          return acc.concat([current]);
-        } else {
-          return acc;
+
+      // Client-side filtering to avoid requiring unindexed composite Firestore queries
+      let filtered = leadsData;
+      if (!isAdmin) {
+        filtered = leadsData.filter(l => 
+          l.ownerId === user.uid || 
+          (l.assignedUserIds && Array.isArray(l.assignedUserIds) && l.assignedUserIds.includes(user.uid))
+        );
+      } else if (viewingUserId) {
+        filtered = leadsData.filter(l => 
+          l.ownerId === viewingUserId || 
+          (l.assignedUserIds && Array.isArray(l.assignedUserIds) && l.assignedUserIds.includes(viewingUserId))
+        );
+      }
+
+      // Sort client-side by createdAt descending
+      filtered.sort((a, b) => {
+        const getTime = (val: any) => {
+          if (!val) return 0;
+          if (typeof val === 'object' && 'toDate' in val && typeof val.toDate === 'function') {
+            return val.toDate().getTime();
+          }
+          if (typeof val === 'number') return val;
+          const parsed = new Date(val).getTime();
+          return isNaN(parsed) ? 0 : parsed;
+        };
+        return getTime(b.createdAt) - getTime(a.createdAt);
+      });
+
+      // Deduplicate by ID
+      const uniqueLeads = filtered.reduce((acc, current) => {
+        if (!acc.some(item => item.id === current.id)) {
+          acc.push(current);
         }
+        return acc;
       }, [] as Lead[]);
-      console.log(`Fetched ${uniqueLeads.length} unique leads for user ${user.uid}`);
+
+      console.log(`[LEADS] Realtime update: ${uniqueLeads.length} leads displayed for user ${user.uid}`);
       setLeads(uniqueLeads);
     }, (error: any) => {
       const errMsg = error?.message || String(error);
@@ -1054,7 +1069,7 @@ export default function App() {
     });
 
     return unsubscribe;
-  }, [user, userProfile, viewingUserId]);
+  }, [user, userProfile, isAdmin, viewingUserId]);
 
   const filteredLeads = useMemo(() => {
     return leads.filter(l => {
