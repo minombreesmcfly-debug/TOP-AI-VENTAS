@@ -73,7 +73,6 @@ export function UserManagement({ onInspectUser, onInspectProfile }: UserManageme
   const [pin, setPin] = useState('');
   const [role, setRole] = useState<UserRole>('user');
   const [status, setStatus] = useState<UserStatus>('approved');
-  const [trio, setTrio] = useState('');
   const [mins, setMins] = useState('');
   const [bankName, setBankName] = useState('');
   const [accountNumber, setAccountNumber] = useState('');
@@ -105,7 +104,6 @@ export function UserManagement({ onInspectUser, onInspectProfile }: UserManageme
     setPin('');
     setRole('user');
     setStatus('approved');
-    setTrio('');
     setMins('');
     setBankName('');
     setAccountNumber('');
@@ -121,7 +119,6 @@ export function UserManagement({ onInspectUser, onInspectProfile }: UserManageme
     setPin(user.pin || '');
     setRole(user.role || 'user');
     setStatus(user.status || 'approved');
-    setTrio(user.trio || '');
     setMins(user.mins || '');
     setBankName(user.bankName || '');
     setAccountNumber(user.accountNumber || '');
@@ -172,7 +169,6 @@ export function UserManagement({ onInspectUser, onInspectProfile }: UserManageme
         pin: pin.trim(),
         role,
         status,
-        trio: trio.trim(),
         mins: mins.trim(),
         bankName: bankName,
         accountNumber: accountNumber.trim(),
@@ -204,23 +200,19 @@ export function UserManagement({ onInspectUser, onInspectProfile }: UserManageme
       // Try Firestore
       try {
         if (selectedUser) {
-          updateDoc(doc(db, 'users', targetUid), {
+          await updateDoc(doc(db, 'users', targetUid), {
             ...userData,
-            updatedAt: serverTimestamp()
-          }).catch((fireErr) => {
-            console.warn("Firestore update deferred. Kept user in local storage.", fireErr);
+            updatedAt: new Date().toISOString()
           });
         } else {
-          setDoc(doc(db, 'users', targetUid), {
+          await setDoc(doc(db, 'users', targetUid), {
             ...userData,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp()
-          }).catch((fireErr) => {
-            console.warn("Firestore set deferred. Kept user in local storage.", fireErr);
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
           });
         }
       } catch (fireErr) {
-        console.warn("Firestore save initiation failed.", fireErr);
+        console.warn("Firestore save fallback:", fireErr);
       }
 
       alert(selectedUser ? "Usuario actualizado correctamente." : "Usuario creado correctamente.");

@@ -1,4 +1,5 @@
 import { UserProfile } from '../types';
+import { doc, setDoc, getDoc } from 'firebase/firestore';
 
 const LOCAL_USERS_KEY = 'top_ai_mkt_local_users';
 
@@ -17,11 +18,10 @@ export function saveLocalUser(user: UserProfile): void {
     const users = getLocalUsers();
     const cleanUser = {
       ...user,
-      // Ensure we convert Firestore timestamps to string/Date equivalent for local storage if needed
       createdAt: user.createdAt ? (typeof user.createdAt === 'object' && 'toDate' in user.createdAt ? (user.createdAt as any).toDate().toISOString() : user.createdAt) : new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    const index = users.findIndex(u => u.uid === user.uid || u.phone === user.phone);
+    const index = users.findIndex(u => u.uid === user.uid || (u.phone && user.phone && u.phone === user.phone));
     if (index > -1) {
       users[index] = { ...users[index], ...cleanUser };
     } else {
@@ -30,6 +30,34 @@ export function saveLocalUser(user: UserProfile): void {
     localStorage.setItem(LOCAL_USERS_KEY, JSON.stringify(users));
   } catch (err) {
     console.warn("Failed to save local user:", err);
+  }
+}
+
+export async function syncLocalUsersToFirestore(db: any): Promise<void> {
+  try {
+    const localUsers = getLocalUsers();
+    if (!localUsers || localUsers.length === 0) return;
+
+    for (const lu of localUsers) {
+      if (lu.uid) {
+        try {
+          const userRef = doc(db, 'users', lu.uid);
+          const snap = await getDoc(userRef);
+          if (!snap.exists()) {
+            await setDoc(userRef, {
+              ...lu,
+              createdAt: lu.createdAt || new Date().toISOString(),
+              updatedAt: lu.updatedAt || new Date().toISOString()
+            });
+            console.log(`[SYNC] Synced local user ${lu.displayName || lu.uid} to Firestore database`);
+          }
+        } catch (err) {
+          console.warn(`[SYNC] Deferring user sync for ${lu.uid}:`, err);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("Failed syncLocalUsersToFirestore:", err);
   }
 }
 

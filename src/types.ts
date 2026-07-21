@@ -13,7 +13,6 @@ export interface UserProfile {
   phone?: string;
   state?: string;
   pin?: string; // Security PIN / password
-  trio?: string; // User's custom trio
   mins?: string; // User's assigned minutes
   bankName?: string;
   accountNumber?: string;

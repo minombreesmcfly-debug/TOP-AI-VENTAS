@@ -16,6 +16,7 @@ import {
 import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { UserProfile } from '../types';
+import { saveLocalUser } from '../lib/local-users';
 
 const MEXICAN_STATES = [
   "Aguascalientes", "Baja California", "Baja California Sur", "Campeche", "Chiapas", 
@@ -34,9 +35,10 @@ const COMMON_BANKS = [
 
 interface ProfileSettingsProps {
   userProfile: UserProfile;
+  onProfileUpdated?: (updated: UserProfile) => void;
 }
 
-export function ProfileSettings({ userProfile }: ProfileSettingsProps) {
+export function ProfileSettings({ userProfile, onProfileUpdated }: ProfileSettingsProps) {
   const [formData, setFormData] = useState({
     displayName: userProfile.displayName || '',
     phone: userProfile.phone || '',
@@ -60,16 +62,33 @@ export function ProfileSettings({ userProfile }: ProfileSettingsProps) {
     setLoading(true);
     setSaved(false);
     
+    const updatedProfile: UserProfile = {
+      ...userProfile,
+      ...formData,
+      updatedAt: new Date().toISOString()
+    };
+
+    // Save locally first
+    saveLocalUser(updatedProfile);
+
+    // Broadcast change to top-level state immediately
+    if (onProfileUpdated) {
+      onProfileUpdated(updatedProfile);
+    }
+    
     try {
-      await updateDoc(doc(db, 'users', userProfile.uid), {
+      // Fire-and-forget background update to Firestore (non-blocking)
+      updateDoc(doc(db, 'users', userProfile.uid), {
         ...formData,
         updatedAt: serverTimestamp()
+      }).catch((fireErr) => {
+        console.warn("Firestore profile background update deferred (offline/permission):", fireErr);
       });
+      
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
     } catch (err) {
-      console.error("Error updating profile:", err);
-      alert("Error al guardar los datos de perfil.");
+      console.warn("Failed to initiate Firestore profile update:", err);
     } finally {
       setLoading(false);
     }
@@ -77,17 +96,6 @@ export function ProfileSettings({ userProfile }: ProfileSettingsProps) {
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
-      {/* 1. Dashboard plan status badges */}
-      <div className="bg-gradient-to-br from-indigo-500 to-indigo-600 p-6 rounded-3xl text-white shadow-xl shadow-indigo-100 flex items-center justify-between max-w-sm">
-        <div>
-          <p className="text-[10px] font-black uppercase tracking-wider text-indigo-100">Mi Trio Asignado</p>
-          <h3 className="text-xl font-black mt-1">{userProfile.trio || 'Sin Trio Asignado'}</h3>
-        </div>
-        <div className="p-3 bg-white/20 rounded-2xl">
-          <Award size={24} />
-        </div>
-      </div>
-
       <div className="bg-white rounded-3xl shadow-xl border border-slate-100 overflow-hidden">
         <div className="bg-indigo-600 p-8 text-white">
           <div className="flex items-center gap-4">

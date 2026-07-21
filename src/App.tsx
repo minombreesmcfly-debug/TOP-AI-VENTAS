@@ -29,7 +29,7 @@ import {
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { db, auth, signIn, signOut } from './lib/firebase';
 import { Lead, DemoStatus, PackageStatus, PACKAGE_INFO, DEMO_STATUS_COLORS, UserProfile } from './types';
-import { getLocalUsers, saveLocalUser, syncAndMergeUsers } from './lib/local-users';
+import { getLocalUsers, saveLocalUser, syncAndMergeUsers, syncLocalUsersToFirestore } from './lib/local-users';
 import { formatMexicanPhone } from './lib/phone-helper';
 import { OperationType, handleFirestoreError } from './lib/error-handler';
 import { AIImporter } from './components/AIImporter';
@@ -39,9 +39,11 @@ import { DashboardAnalytics } from './components/DashboardAnalytics';
 import { ProfileSettings } from './components/ProfileSettings';
 import { TeamChat } from './components/TeamChat';
 import { SalesAIAssistant } from './components/SalesAIAssistant';
+import { SalesMaterials } from './components/SalesMaterials';
 import { 
   Plus, 
   LogOut, 
+  Presentation,
   LogIn, 
   Phone, 
   ExternalLink, 
@@ -206,14 +208,32 @@ function LeadMarker({ lead, allUsers, isSelected, onClick }: { lead: Lead, allUs
 
 // --- App Component ---
 
+function Logo({ className = "w-10 h-10 bg-white" }: { className?: string }) {
+  const [hasLogo, setHasLogo] = useState(true);
+  
+  return (
+    <div className={`${className} rounded-xl flex items-center justify-center overflow-hidden border border-slate-100/10 shadow-sm`}>
+      {hasLogo ? (
+        <img 
+          src="/logo.png" 
+          alt="Top AI MKT Logo" 
+          className="w-full h-full object-contain p-0.5"
+          onError={() => setHasLogo(false)}
+          referrerPolicy="no-referrer"
+        />
+      ) : (
+        <div className="w-5 h-5 border-3 border-indigo-600 rounded-full border-t-transparent animate-[spin_1s_linear_infinite]"></div>
+      )}
+    </div>
+  );
+}
+
 function Header({ user, userProfile, isAdmin }: { user: User | null, userProfile: UserProfile | null, isAdmin: boolean }) {
   return (
     <header className="bg-indigo-600 text-white shadow-lg sticky top-0 z-40">
       <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center">
-            <div className="w-6 h-6 border-4 border-indigo-600 rounded-full border-t-transparent animate-[pulse_2s_ease-in-out_infinite]"></div>
-          </div>
+          <Logo className="w-10 h-10 bg-white" />
           <h1 className="text-2xl font-black tracking-tight flex items-baseline gap-2">
             TOP AI MKT 
             <span className="text-indigo-200 font-light italic text-sm hidden sm:inline">LeadOS</span>
@@ -448,7 +468,7 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
-  const [view, setView] = useState<'leads' | 'users' | 'analytics' | 'profile' | 'chat' | 'ai'>('leads');
+  const [view, setView] = useState<'leads' | 'users' | 'analytics' | 'profile' | 'chat' | 'ai' | 'materials'>('leads');
   
   // Custom Auth state
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
@@ -478,6 +498,9 @@ export default function App() {
       let profile: UserProfile | null = null;
       const usernameLower = loginUsername.trim().toLowerCase();
       
+      const trimmedPhone = loginUsername.trim();
+      const inputDigits = trimmedPhone.replace(/\D/g, '');
+
       if (usernameLower === 'admin') {
         // Try Firestore first for admin
         try {
@@ -504,7 +527,6 @@ export default function App() {
               role: 'admin',
               status: 'approved',
               pin: '3223',
-              trio: 'Admin',
               mins: 'Ilimitados',
               createdAt: new Date().toISOString(),
               updatedAt: new Date().toISOString()
@@ -513,21 +535,50 @@ export default function App() {
           }
         }
       } else {
-        // Look up locally first - instant and 100% robust offline
+        // 1. Look up locally first
         const localUsers = getLocalUsers();
-        profile = localUsers.find(u => u.phone === loginUsername.trim()) || null;
+        profile = localUsers.find(u => 
+          u.phone === trimmedPhone ||
+          (inputDigits.length >= 7 && u.phone && u.phone.replace(/\D/g, '') === inputDigits) ||
+          (inputDigits.length >= 10 && u.phone && u.phone.replace(/\D/g, '').endsWith(inputDigits.slice(-10)))
+        ) || null;
 
-        // If not found locally, attempt Firestore lookup
+        // 2. Query Firestore by exact phone string match
         if (!profile) {
           try {
-            const q = query(collection(db, 'users'), where('phone', '==', loginUsername.trim()));
+            const q = query(collection(db, 'users'), where('phone', '==', trimmedPhone));
             const snap = await robustGetDocs(q);
             if (!snap.empty) {
               profile = { uid: snap.docs[0].id, ...(snap.docs[0].data() as any) } as UserProfile;
               saveLocalUser(profile);
             }
           } catch (err) {
-            console.warn("Could not query Firestore for user phone:", err);
+            console.warn("Could not query Firestore for user phone exact match:", err);
+          }
+        }
+
+        // 3. Query Firestore for all users to match by normalized phone digits or displayName
+        if (!profile) {
+          try {
+            const allUsersSnap = await robustGetDocs(collection(db, 'users'));
+            allUsersSnap.docs.forEach(docSnap => {
+              if (profile) return;
+              const uData = docSnap.data() as UserProfile;
+              const uPhone = (uData.phone || '').trim();
+              const uDigits = uPhone.replace(/\D/g, '');
+
+              if (
+                uPhone === trimmedPhone ||
+                (inputDigits.length >= 7 && uDigits === inputDigits) ||
+                (inputDigits.length >= 10 && uDigits.length >= 10 && uDigits.slice(-10) === inputDigits.slice(-10)) ||
+                (uData.displayName && uData.displayName.trim().toLowerCase() === usernameLower)
+              ) {
+                profile = { uid: docSnap.id, ...uData };
+                saveLocalUser(profile);
+              }
+            });
+          } catch (err) {
+            console.warn("Could not query Firestore all users fallback:", err);
           }
         }
       }
@@ -576,10 +627,14 @@ export default function App() {
     
     try {
       const trimmedPhone = regPhone.trim();
+      const inputDigits = trimmedPhone.replace(/\D/g, '');
       
       // Check local users first
       const localUsers = getLocalUsers();
-      const existingLocal = localUsers.find(u => u.phone === trimmedPhone);
+      const existingLocal = localUsers.find(u => 
+        u.phone === trimmedPhone || 
+        (inputDigits.length >= 7 && u.phone && u.phone.replace(/\D/g, '') === inputDigits)
+      );
       if (existingLocal) {
         setAuthError('Este número de teléfono ya está registrado localmente.');
         setIsAuthenticating(false);
@@ -611,23 +666,25 @@ export default function App() {
         clabe: regClabe.trim(),
         role: 'user',
         status: 'pending', // Pending approval by admin!
-        trio: '',
         mins: '',
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
 
-      // Save locally first to guarantee zero-latency success
+      // Save locally first
       saveLocalUser(userPayload);
 
-      // Attempt to save to Firestore in the background/offline sync
-      setDoc(doc(db, 'users', newUid), {
-        ...userPayload,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      }).catch((err: any) => {
-        console.warn("Firestore save deferred/skipped because client is offline. Local registration succeeded.", err.message);
-      });
+      // Save to Firestore database directly
+      try {
+        await setDoc(doc(db, 'users', newUid), {
+          ...userPayload,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        });
+        console.log("User successfully saved to Firestore database:", newUid);
+      } catch (err: any) {
+        console.warn("Firestore user save warning:", err.message);
+      }
       
       alert('¡Registro exitoso! Tu cuenta está en espera de la aprobación de un administrador.');
       
@@ -834,7 +891,6 @@ export default function App() {
             role: 'admin',
             status: 'approved',
             pin: '3223',
-            trio: 'Admin',
             mins: 'Ilimitados',
             createdAt: new Date(),
             updatedAt: new Date()
@@ -851,7 +907,9 @@ export default function App() {
       }
     };
 
-    ensureAdminExists();
+    ensureAdminExists().then(() => {
+      syncLocalUsersToFirestore(db);
+    });
 
     const customUserId = localStorage.getItem('top_ai_mkt_custom_user_id');
     if (!customUserId) {
@@ -1079,24 +1137,20 @@ export default function App() {
         }
         
         const docRef = doc(db, 'leads', editingLead.id);
-        updateDoc(docRef, rawData).catch((error) => {
-          console.error(">>> [DEBUG] Background updateDoc failed:", error);
-        });
-        console.log(">>> [DEBUG] Update initiated in Firebase");
+        await updateDoc(docRef, rawData);
+        console.log(">>> [DEBUG] Update saved in Firebase");
       } else {
         console.log(">>> [DEBUG] Creando nuevo lead");
         const creatorId = user.uid;
         const finalOwnerId = targetOwnerId || creatorId;
         
-        addDoc(collection(db, 'leads'), {
+        await addDoc(collection(db, 'leads'), {
           ...rawData,
           ownerId: finalOwnerId,
           assignedUserIds: [finalOwnerId],
           createdAt: serverTimestamp(),
-        }).catch((error) => {
-          console.error(">>> [DEBUG] Background addDoc failed:", error);
         });
-        console.log(">>> [DEBUG] Add initiated in Firebase");
+        console.log(">>> [DEBUG] Lead saved in Firebase");
       }
 
       setIsModalOpen(false);
@@ -1222,15 +1276,18 @@ export default function App() {
               animate={{ opacity: 1, y: 0 }}
               className="bg-white rounded-3xl p-8 shadow-xl border border-slate-100 space-y-6"
             >
-              <div className="text-center space-y-2">
-                <h2 className="text-2xl font-black text-slate-800 tracking-tight uppercase">
-                  {authMode === 'login' ? 'Bienvenido' : 'Crear Cuenta'}
-                </h2>
-                <p className="text-slate-400 text-xs font-bold uppercase tracking-wider">
-                  {authMode === 'login' 
-                    ? 'Gestiona tus leads, trios y WhatsApp de clientes'
-                    : 'Llena tus datos para registrarte en Top AI MKT'}
-                </p>
+              <div className="flex flex-col items-center text-center space-y-4">
+                <Logo className="w-16 h-16 bg-slate-50 border border-slate-100 shadow-sm" />
+                <div className="space-y-2">
+                  <h2 className="text-2xl font-black text-slate-800 tracking-tight uppercase">
+                    {authMode === 'login' ? 'Bienvenido' : 'Crear Cuenta'}
+                  </h2>
+                  <p className="text-slate-400 text-xs font-bold uppercase tracking-wider">
+                    {authMode === 'login' 
+                      ? 'Gestiona tus leads y prospectos'
+                      : 'Llena tus datos para registrarte en Top AI MKT'}
+                  </p>
+                </div>
               </div>
 
               {authError && (
@@ -1473,6 +1530,17 @@ export default function App() {
                 ASISTENTE AI
               </button>
               <button 
+                onClick={() => setView('materials')}
+                className={`flex items-center gap-2 px-6 py-2 rounded-xl text-xs font-black transition-all ${
+                  view === 'materials' 
+                    ? 'bg-indigo-600 text-white shadow-md' 
+                    : 'text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                <Presentation size={14} />
+                MATERIAL DE APOYO
+              </button>
+              <button 
                 onClick={() => setView('analytics')}
                 className={`flex items-center gap-2 px-6 py-2 rounded-xl text-xs font-black transition-all ${
                   view === 'analytics' 
@@ -1550,10 +1618,21 @@ export default function App() {
               <TeamChat userProfile={userProfile!} allUsers={allUsers} />
             ) : view === 'ai' ? (
               <SalesAIAssistant userProfile={userProfile!} />
+            ) : view === 'materials' ? (
+              <SalesMaterials userProfile={userProfile!} />
             ) : view === 'analytics' ? (
               <DashboardAnalytics leads={leads} onSelectCategory={handleStatSelect} />
             ) : view === 'profile' ? (
-              <ProfileSettings userProfile={userProfile!} />
+              <ProfileSettings 
+                userProfile={userProfile!} 
+                onProfileUpdated={(updated) => {
+                  setUserProfile(updated);
+                  setUser(prev => prev ? {
+                    ...prev,
+                    displayName: updated.displayName
+                  } : null);
+                }}
+              />
             ) : (
               <>
                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">

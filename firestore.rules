@@ -1,131 +1,20 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // 0. Global Safety Net
-    match /{document=**} {
-      allow read, write: if false;
-    }
-
-    // Phase 3: Primitive Definition
-    function isSignedIn() {
-      return request.auth != null;
-    }
-
-    function isOwner(userId) {
-      return isSignedIn() && request.auth.uid == userId;
-    }
-
-    function isAdmin() {
-      return isSignedIn() && (
-        request.auth.token.email.lower() == 'minombreesmcfly@gmail.com' ||
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'
-      );
-    }
-
-    function isApproved() {
-      return isSignedIn() && (
-        request.auth.token.email.lower() == 'minombreesmcfly@gmail.com' ||
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status == 'approved'
-      );
-    }
-
-    function incoming() {
-      return request.resource.data;
-    }
-
-    function existing() {
-      return resource.data;
-    }
-
-    // Validation Helpers
-    function isValidLead(data) {
-      return data.name is string && data.name.size() > 0 && data.name.size() <= 100
-        && (data.get('businessOwnerName', null) == null || (data.businessOwnerName is string && data.businessOwnerName.size() <= 100))
-        && (data.get('city', null) == null || (data.city is string && data.city.size() <= 100))
-        && (data.get('lastContactDate', null) == null || (data.lastContactDate is string && data.lastContactDate.size() <= 20))
-        && (data.get('notes', null) == null || (data.notes is string && data.notes.size() <= 2000))
-        && (data.get('phone', null) == null || (data.phone is string && data.phone.size() <= 40))
-        && (data.get('latitude', null) == null || data.latitude is number)
-        && (data.get('longitude', null) == null || data.longitude is number)
-        && data.demoStatus in ['new', 'contacted', 'offered', 'accepted', 'sent', 'paid', 'recurring']
-        && data.packageStatus in ['none', 'basic', 'premium']
-        && data.ownerId is string
-        && (data.get('assignedUserIds', null) == null || data.assignedUserIds is list)
-        && data.createdAt is timestamp
-        && data.updatedAt is timestamp;
-    }
-
-    function isValidUser(data) {
-      return data.email is string && data.displayName is string
-        && data.role in ['admin', 'user']
-        && data.status in ['pending', 'approved', 'blocked']
-        && (data.get('bankName', null) == null || (data.bankName is string && data.bankName.size() <= 100))
-        && (data.get('accountNumber', null) == null || (data.accountNumber is string && data.accountNumber.size() <= 40))
-        && (data.get('clabe', null) == null || (data.clabe is string && data.clabe.size() <= 40))
-        && data.createdAt is timestamp
-        && data.updatedAt is timestamp;
-    }
-
-    function isSharedMember(data) {
-      return isSignedIn() && (
-        data.ownerId == request.auth.uid || 
-        (data.get('assignedUserIds', null) != null && request.auth.uid in data.assignedUserIds)
-      );
-    }
-
-    // Collection: Leads
-    match /leads/{leadId} {
-      allow get: if isSignedIn() && (isSharedMember(existing()) || isAdmin());
-      allow list: if isSignedIn() && (
-        resource.data.ownerId == request.auth.uid || 
-        (resource.data.get('assignedUserIds', null) != null && request.auth.uid in resource.data.assignedUserIds) ||
-        isAdmin()
-      );
-      
-      allow create: if isApproved() 
-        && isValidLead(incoming())
-        && (isOwner(incoming().ownerId) || isAdmin())
-        && incoming().createdAt == request.time
-        && incoming().updatedAt == request.time;
-
-      allow update: if isSignedIn()
-        && (isSharedMember(existing()) || isAdmin())
-        && isValidLead(incoming())
-        && incoming().createdAt == existing().createdAt
-        && incoming().updatedAt == request.time;
-
-      allow delete: if isSignedIn() && (isSharedMember(existing()) || isAdmin());
-    }
-
-    // Collection: Users
     match /users/{userId} {
-      allow read: if isSignedIn() && (isOwner(userId) || isAdmin());
-      
-      // Allow creation during first login
-      allow create: if isOwner(userId)
-        && isValidUser(incoming())
-        && (request.auth.token.email.lower() == 'minombreesmcfly@gmail.com' || (incoming().role == 'user' && incoming().status == 'pending'))
-        && incoming().createdAt == request.time
-        && incoming().updatedAt == request.time;
-
-      // Only admins can change roles or status, except bootstrap admin who can fix their own state
-      allow update: if isAdmin()
-        || (isOwner(userId) 
-            && isValidUser(incoming())
-            && (request.auth.token.email.lower() == 'minombreesmcfly@gmail.com' || (incoming().role == existing().role && incoming().status == existing().status))
-            && incoming().updatedAt == request.time);
+      allow read, write: if true;
     }
 
-    // Collection: Team Chat Messages
+    match /leads/{leadId} {
+      allow read, write: if true;
+    }
+
+    match /sales_flyers/{flyerId} {
+      allow read, write: if true;
+    }
+
     match /team_chat_messages/{messageId} {
-      allow read: if isSignedIn();
-      allow create: if isApproved()
-        && request.resource.data.senderId == request.auth.uid
-        && request.resource.data.text is string
-        && request.resource.data.text.size() > 0
-        && request.resource.data.text.size() <= 1000
-        && request.resource.data.createdAt == request.time;
-      allow delete, update: if isAdmin() || (isSignedIn() && resource.data.senderId == request.auth.uid);
+      allow read, write: if true;
     }
   }
 }
